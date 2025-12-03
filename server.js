@@ -26,9 +26,6 @@ app.post('/add-to-collection', (req, res) => {
   console.log('Source:', source);
   console.log('---------------------------------');
 
-  // TODO: her kan vi senere kalde Shopify Admin API
-  // og lægge produktet i kundens kollektion.
-
   res.json({
     ok: true,
     message: 'Request received on collection service',
@@ -39,4 +36,3 @@ app.post('/add-to-collection', (req, res) => {
 app.listen(PORT, () => {
   console.log(`TT collection service listening on port ${PORT}`);
 });
-
