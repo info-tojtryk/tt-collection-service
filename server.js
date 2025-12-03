@@ -1,13 +1,26 @@
-// server.js
 const express = require('express');
-const app = express();
+const cors = require('cors'); // NYT
 
+const app = express();
 const PORT = process.env.PORT || 3000;
+
+/**
+ * CORS – giv kun adgang fra din shop
+ * Justér domæner hvis du også bruger .myshopify.com præview
+ */
+app.use(cors({
+  origin: [
+    'https://tojtryk.dk',
+    'https://www.tojtryk.dk'
+  ],
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type']
+}));
 
 // Middleware til JSON
 app.use(express.json());
 
-// Health-check route
+// Health-check
 app.get('/', (req, res) => {
   res.send('TT collection service is running');
 });
@@ -28,7 +41,7 @@ app.post('/add-to-collection', (req, res) => {
 
   res.json({
     ok: true,
-    message: 'Request received on collection service',
+    message: 'Request received on collection service'
   });
 });
 
