@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 
-const app = express();
+const app = express(); // <--- Denne linje manglede i de partielle opdateringer
 const PORT = process.env.PORT || 3000;
 
 // CORS – åbn for alle domæner (kan strammes op senere)
@@ -111,7 +111,7 @@ app.post('/remove-from-collection', async (req, res) => {
             return res.status(404).json({ success: false, error: 'Product not found in collection' });
         }
         
-        const collectId = searchJson.collects[0].id; // Bruger index 0
+        const collectId = searchJson.collects[0].id; // Korrekt brug af array index 0
         const deleteUrl = `https://${shopDomain}/admin/api/2024-01/collects/${collectId}.json`;
 
         const deleteResp = await fetch(deleteUrl, { method: 'DELETE', headers: { 'X-Shopify-Access-Token': adminToken } });
@@ -138,8 +138,6 @@ app.post('/assign-to-employee', async (req, res) => {
     const { productId, variantId, employeeName, shop } = req.body || {};
 
     console.log('--- Assign to Employee request ---');
-    console.log(`Product: ${productId}, Variant: ${variantId}, Employee: ${employeeName}`);
-
     if (!productId || !variantId || !employeeName) {
         return res.status(400).json({ success: false, error: 'Missing productId, variantId, or employeeName' });
     }
@@ -151,13 +149,12 @@ app.post('/assign-to-employee', async (req, res) => {
     const { shopDomain, adminToken } = credentials;
 
     try {
-        // Vi opdaterer et metafelt på varianten
         const metafieldUrl = `https://${shopDomain}/admin/api/2024-01/variants/${variantId}/metafields.json`;
         
         const metafieldPayload = {
             metafield: {
-                namespace: "custom", // Sørg for at dette namespace eksisterer i din Shopify admin
-                key: "assigned_employee", // Du kan ændre denne nøgle hvis nødvendigt
+                namespace: "custom", 
+                key: "assigned_employee", 
                 value: employeeName,
                 type: "single_line_text_field"
             }
