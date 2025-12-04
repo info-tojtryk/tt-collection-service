@@ -4,18 +4,8 @@ const cors = require('cors');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/**
- * CORS – giv adgang fra både live-domæne og myshopify-preview
- */
-app.use(cors({
-  origin: [
-    'https://tojtryk.dk',
-    'https://www.tojtryk.dk',
-    'https://tojtryk.myshopify.com'
-  ],
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type']
-}));
+// 🚨 Midlertidigt: tillad alle origins (for at udelukke CORS som fejl)
+app.use(cors());
 
 // Middleware til JSON
 app.use(express.json());
@@ -39,7 +29,6 @@ app.post('/add-to-collection', (req, res) => {
   console.log('Source:', source);
   console.log('---------------------------------');
 
-  // VIGTIGT: svar med success: true (nemt at forstå i frontend)
   res.json({
     success: true,
     message: 'Request received on collection service'
