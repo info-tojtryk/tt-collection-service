@@ -4,47 +4,33 @@ const cors = require("cors");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Middleware
-app.use(cors());            // Åbner for CORS (kan strammes senere)
-app.use(express.json());    // JSON-body parsing
+app.use(cors());
+app.use(express.json());
 
-// Fra Render env vars
 const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-const SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN; // fx "gn2axf-h1.myshopify.com"
+const SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
 const API_VERSION = "2024-01";
 
 if (!ADMIN_API_TOKEN || !SHOP_DOMAIN) {
   console.warn("⚠️ Mangler SHOPIFY_ADMIN_TOKEN eller SHOPIFY_SHOP_DOMAIN i env vars");
 }
 
-// Root – healthcheck
+// Healthcheck
 app.get("/", (req, res) => {
   res.send("TT collection service is running ✅");
 });
 
 /**
  * POST /add-to-collection
- * Forventet body fra din produkt-side:
- * {
- *   customerId: "...",
- *   productId: "...",
- *   collectionId: "...",   // kommer fra customer.metafields.b2b.personal_collection_id
- *   variantId: "...",
- *   source: "product-page",
- *   shop: "gn2axf-h1.myshopify.com"
- * }
  */
 app.post("/add-to-collection", async (req, res) => {
-  // Understøt både camelCase og snake_case for bagudkompatibilitet
   const productId = req.body.productId || req.body.product_id || null;
   const customerId = req.body.customerId || req.body.customer_id || null;
-  const collectionIdFromBody =
-    req.body.collectionId || req.body.collection_id || null;
+  const collectionIdFromBody = req.body.collectionId || req.body.collection_id || null;
   const variantId = req.body.variantId || req.body.variant_id || null;
   const source = req.body.source || "unknown";
   const shopFromBody = req.body.shop || SHOP_DOMAIN;
 
-  // Produkt er absolut minimumskrav, uden det kan vi ikke lave collect
   if (!productId) {
     return res.status(400).json({
       success: false,
@@ -52,7 +38,6 @@ app.post("/add-to-collection", async (req, res) => {
     });
   }
 
-  // Vi vil meget gerne have customerId også – enten til fallback eller logging
   if (!customerId && !collectionIdFromBody) {
     return res.status(400).json({
       success: false,
@@ -72,8 +57,7 @@ app.post("/add-to-collection", async (req, res) => {
   let collectionId = collectionIdFromBody;
 
   try {
-    // 1) Hvis vi IKKE fik collectionId med fra frontenden,
-    //    forsøger vi at slå det op på kunden via metafields
+    // 1) Find eller opret personlig kollektion
     if (!collectionId) {
       const metafieldsRes = await fetch(
         `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/customers/${customerId}/metafields.json`,
@@ -95,21 +79,16 @@ app.post("/add-to-collection", async (req, res) => {
         });
       }
 
-      // Forsøg først at finde din B2B-metafield:
-      // namespace: "b2b", key: "personal_collection_id"
       let collectionIdMeta = metafieldsJson.metafields?.find(
         (mf) =>
-          (mf.namespace === "b2b" &&
-            mf.key === "personal_collection_id") ||
+          (mf.namespace === "b2b" && mf.key === "personal_collection_id") ||
           (mf.namespace === "custom" && mf.key === "collection_id")
       );
 
-      // Hvis vi fandt noget – brug det
       if (collectionIdMeta) {
         collectionId = collectionIdMeta.value;
         console.log("Found collectionId in metafield:", collectionId);
       } else {
-        // 2) Hvis kunden slet ikke har en kollektion endnu → opret én
         console.log("No collection metafield found – creating new collection…");
 
         const createColRes = await fetch(
@@ -139,12 +118,8 @@ app.post("/add-to-collection", async (req, res) => {
         }
 
         collectionId = createColJson.custom_collection.id;
-
         console.log("Created new collection with ID:", collectionId);
 
-        // Gem som metafield på kunden – brug B2B-navngivning,
-        // så det matcher dit Liquid:
-        // customer.metafields.b2b.personal_collection_id
         const metaCreateRes = await fetch(
           `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/customers/${customerId}/metafields.json`,
           {
@@ -174,7 +149,6 @@ app.post("/add-to-collection", async (req, res) => {
       }
     }
 
-    // Hvis vi stadig ikke har et collectionId her, så giv op
     if (!collectionId) {
       return res.json({
         success: false,
@@ -182,7 +156,7 @@ app.post("/add-to-collection", async (req, res) => {
       });
     }
 
-    // 3) Tilføj produkt til kollektionen (på produkt-niveau, ikke variant)
+    // 2) Tilføj produkt til kollektionen
     const addProductRes = await fetch(
       `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/collects.json`,
       {
@@ -227,18 +201,7 @@ app.post("/add-to-collection", async (req, res) => {
 
 /**
  * POST /assign-to-employee
- *
- * Body:
- * {
- *   productId: "...",
- *   variantId: "...",
- *   employeeAddressId: "...",   // address.id
- *   employeeName: "...",        // kun til log
- *   customerId: "...",          // kunden vi gemmer metafield på
- *   shop: "gn2axf-h1.myshopify.com" // valgfri, kun til log
- * }
- *
- * Gemmer på CUSTOMER-metafield:
+ * Gemmer på customer-metafield:
  * namespace: "b2b"
  * key: "assigned_variants"
  * type: "multi_line_text_field"
@@ -307,7 +270,7 @@ app.post("/assign-to-employee", async (req, res) => {
       });
     }
 
-    // 2) Find eksisterende b2b.assigned_variants (på CUSTOMER)
+    // 2) Find eksisterende b2b.assigned_variants
     let assignedMeta = Array.isArray(mfJson.metafields)
       ? mfJson.metafields.find(
           (mf) => mf.namespace === "b2b" && mf.key === "assigned_variants"
@@ -332,11 +295,92 @@ app.post("/assign-to-employee", async (req, res) => {
     const pid = String(productId);
     const vid = String(variantId);
 
-    // 3) Opdater JS-strukturen
-    // {
-    //   "<addressId>": {
-    //     "<productId>": ["<variantId1>", "<variantId2>", ...]
-    //   }
-    // }
+    // 3) Opdater strukturen
+    if (!assignedValue[addrId]) {
+      assignedValue[addrId] = {};
+    }
 
-    if (!assign
+    if (!Array.isArray(assignedValue[addrId][pid])) {
+      assignedValue[addrId][pid] = [];
+    }
+
+    if (!assignedValue[addrId][pid].includes(vid)) {
+      assignedValue[addrId][pid].push(vid);
+    }
+
+    const newValueString = JSON.stringify(assignedValue, null, 2);
+    const METAFIELD_TYPE = "multi_line_text_field";
+
+    let saveRes;
+    let saveJson;
+
+    if (assignedMeta) {
+      // UPDATE eksisterende metafield
+      saveRes = await fetch(
+        `${baseUrl}/metafields/${assignedMeta.id}.json`,
+        {
+          method: "PUT",
+          headers: {
+            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            metafield: {
+              id: assignedMeta.id,
+              type: METAFIELD_TYPE,
+              value: newValueString,
+            },
+          }),
+        }
+      );
+    } else {
+      // CREATE nyt metafield på customer
+      saveRes = await fetch(
+        `${baseUrl}/customers/${customerId}/metafields.json`,
+        {
+          method: "POST",
+          headers: {
+            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            metafield: {
+              namespace: "b2b",
+              key: "assigned_variants",
+              type: METAFIELD_TYPE,
+              value: newValueString,
+            },
+          }),
+        }
+      );
+    }
+
+    saveJson = await saveRes.json();
+    console.log("Save metafield status:", saveRes.status);
+    console.log("Save metafield body:", JSON.stringify(saveJson, null, 2));
+
+    if (!saveRes.ok) {
+      console.error("Save metafield error:", saveJson);
+      return res.status(500).json({
+        success: false,
+        error: "Kunne ikke gemme assigned_variants-metafield",
+        details: saveJson,
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Variant ${variantId} assigned to ${employeeName}`,
+      assigned: assignedValue,
+    });
+  } catch (err) {
+    console.error("Server error (assign-to-employee):", err);
+    return res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
+
+// Start server
+app.listen(
