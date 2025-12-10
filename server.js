@@ -143,8 +143,6 @@ app.post("/add-to-collection", async (req, res) => {
 
         if (!metaCreateRes.ok) {
           console.error("Create metafield error:", metaCreateJson);
-          // Ikke fatal – kollektionen eksisterer,
-          // men vi kan ikke gemme ID'et som metafield.
         }
       }
     }
@@ -156,7 +154,6 @@ app.post("/add-to-collection", async (req, res) => {
       });
     }
 
-    // 2) Tilføj produkt til kollektionen
     const addProductRes = await fetch(
       `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/collects.json`,
       {
@@ -201,17 +198,6 @@ app.post("/add-to-collection", async (req, res) => {
 
 /**
  * POST /assign-to-employee
- * Gemmer på customer-metafield:
- * namespace: "b2b"
- * key: "assigned_variants"
- * type: "multi_line_text_field"
- *
- * Struktur:
- * {
- *   "<addressId>": {
- *     "<productId>": ["<variantId1>", "<variantId2>", ...]
- *   }
- * }
  */
 app.post("/assign-to-employee", async (req, res) => {
   const {
@@ -246,7 +232,6 @@ app.post("/assign-to-employee", async (req, res) => {
   try {
     const baseUrl = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}`;
 
-    // 1) Hent kundens metafields
     const mfRes = await fetch(
       `${baseUrl}/customers/${customerId}/metafields.json`,
       {
@@ -270,7 +255,6 @@ app.post("/assign-to-employee", async (req, res) => {
       });
     }
 
-    // 2) Find eksisterende b2b.assigned_variants
     let assignedMeta = Array.isArray(mfJson.metafields)
       ? mfJson.metafields.find(
           (mf) => mf.namespace === "b2b" && mf.key === "assigned_variants"
@@ -295,7 +279,6 @@ app.post("/assign-to-employee", async (req, res) => {
     const pid = String(productId);
     const vid = String(variantId);
 
-    // 3) Opdater strukturen
     if (!assignedValue[addrId]) {
       assignedValue[addrId] = {};
     }
@@ -315,7 +298,6 @@ app.post("/assign-to-employee", async (req, res) => {
     let saveJson;
 
     if (assignedMeta) {
-      // UPDATE eksisterende metafield
       saveRes = await fetch(
         `${baseUrl}/metafields/${assignedMeta.id}.json`,
         {
@@ -334,7 +316,6 @@ app.post("/assign-to-employee", async (req, res) => {
         }
       );
     } else {
-      // CREATE nyt metafield på customer
       saveRes = await fetch(
         `${baseUrl}/customers/${customerId}/metafields.json`,
         {
@@ -382,5 +363,6 @@ app.post("/assign-to-employee", async (req, res) => {
   }
 });
 
-// Start server
-app.listen(
+app.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}`);
+});
