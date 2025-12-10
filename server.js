@@ -1,190 +1,217 @@
-const express = require('express');
-const cors = require('cors');
+const express = require("express");
 
-const app = express(); // <--- Denne linje manglede i de partielle opdateringer
-const PORT = process.env.PORT || 3000;
-
-// CORS – åbn for alle domæner (kan strammes op senere)
-app.use(cors());
-
-// Middleware til JSON
+const app = express();
 app.use(express.json());
 
-// Health-check
-app.get('/', (req, res) => {
-  res.send('TT collection service is running');
+// Fra Render env vars
+const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+const SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN; // fx "gn2axf-h1.myshopify.com"
+const API_VERSION = "2024-01";
+
+// Root – healthcheck
+app.get("/", (req, res) => {
+  res.send("TT collection service is running ✅");
 });
 
 /**
- * Hjælpefunktion til at hente Shopify-legitimationsoplysninger
+ * POST /add-to-collection
+ * Forventet body fra din produkt-side:
+ * {
+ *   customerId: "...",
+ *   productId: "...",
+ *   collectionId: "...",   // kommer fra customer.metafields.b2b.personal_collection_id
+ *   variantId: "...",
+ *   source: "product-page",
+ *   shop: "gn2axf-h1.myshopify.com"
+ * }
  */
-function getShopifyCredentials(shop) {
-  const shopDomain = process.env.SHOPIFY_SHOP || shop;
-  const adminToken = process.env.SHOPIFY_ADMIN_TOKEN;
+app.post("/add-to-collection", async (req, res) => {
+  // Understøt både camelCase og snake_case for bagudkompatibilitet
+  const productId = req.body.productId || req.body.product_id || null;
+  const customerId = req.body.customerId || req.body.customer_id || null;
+  const collectionIdFromBody =
+    req.body.collectionId || req.body.collection_id || null;
+  const variantId = req.body.variantId || req.body.variant_id || null;
+  const source = req.body.source || "unknown";
+  const shopFromBody = req.body.shop || SHOP_DOMAIN;
 
-  if (!shopDomain || !adminToken) {
-    console.error('Missing SHOPIFY_SHOP or SHOPIFY_ADMIN_TOKEN env');
-    return null;
-  }
-  return { shopDomain, adminToken };
-}
-
-/**
- * Add product to customer's personal collection
- * Body: { customerId, productId, collectionId, variantId, source, shop }
- */
-app.post('/add-to-collection', async (req, res) => {
-  const { productId, collectionId, source, shop } = req.body || {};
-
-  console.log('--- Add to collection request ---');
-  if (!productId || !collectionId) {
-    return res.status(400).json({ success: false, error: 'Missing productId or collectionId' });
+  // Produkt er absolut minimumskrav, uden det kan vi ikke lave collect
+  if (!productId) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing productId / product_id",
+    });
   }
 
-  const credentials = getShopifyCredentials(shop);
-  if (!credentials) {
-    return res.status(500).json({ success: false, error: 'Server misconfigured' });
+  // Vi vil meget gerne have customerId også – enten til fallback eller logging
+  if (!customerId && !collectionIdFromBody) {
+    return res.status(400).json({
+      success: false,
+      error: "Missing customerId (for metafield lookup) and collectionId",
+    });
   }
-  const { shopDomain, adminToken } = credentials;
+
+  console.log("----- Add to collection request -----");
+  console.log("Shop:     ", shopFromBody);
+  console.log("Source:   ", source);
+  console.log("Customer: ", customerId || "N/A");
+  console.log("Product:  ", productId);
+  console.log("Variant:  ", variantId || "N/A");
+  console.log("Coll (in):", collectionIdFromBody || "N/A");
+  console.log("-------------------------------------");
+
+  let collectionId = collectionIdFromBody;
 
   try {
-    const url = `https://${shopDomain}/admin/api/2024-01/collects.json`;
-    const payload = {
-      collect: {
-        product_id: Number(productId),
-        collection_id: Number(collectionId)
-      }
-    };
-
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'X-Shopify-Access-Token': adminToken,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const text = await resp.text();
-    let json;
-    try {
-      json = JSON.parse(text);
-    } catch (e) {
-      json = { raw: text };
-    }
-
-    if (!resp.ok) {
-        // Håndtering af "already exists" fejl
-        const errorDetails = json.errors || json.details;
-        if (resp.status === 422 && JSON.stringify(errorDetails).includes('already exists')) {
-            return res.json({ success: true, message: 'Product already existed in collection', shopify: json });
+    // 1) Hvis vi IKKE fik collectionId med fra frontenden,
+    //    forsøger vi at slå det op på kunden via metafields
+    if (!collectionId) {
+      const metafieldsRes = await fetch(
+        `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/customers/${customerId}/metafields.json`,
+        {
+          headers: {
+            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+            "Content-Type": "application/json",
+          },
         }
-        return res.status(500).json({ success: false, error: 'Shopify API error', details: json });
+      );
+
+      const metafieldsJson = await metafieldsRes.json();
+
+      if (!metafieldsRes.ok) {
+        console.error("Metafields fetch error:", metafieldsJson);
+        return res.json({
+          success: false,
+          error: "Kunne ikke hente kundens metafields",
+        });
+      }
+
+      // Forsøg først at finde din B2B-metafield:
+      // namespace: "b2b", key: "personal_collection_id"
+      let collectionIdMeta = metafieldsJson.metafields?.find(
+        (mf) =>
+          (mf.namespace === "b2b" &&
+            mf.key === "personal_collection_id") ||
+          (mf.namespace === "custom" && mf.key === "collection_id")
+      );
+
+      // Hvis vi fandt noget – brug det
+      if (collectionIdMeta) {
+        collectionId = collectionIdMeta.value;
+        console.log("Found collectionId in metafield:", collectionId);
+      } else {
+        // 2) Hvis kunden slet ikke har en kollektion endnu → opret én
+        console.log("No collection metafield found – creating new collection…");
+
+        const createColRes = await fetch(
+          `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/custom_collections.json`,
+          {
+            method: "POST",
+            headers: {
+              "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              custom_collection: {
+                title: `Kundeshop #${customerId}`,
+              },
+            }),
+          }
+        );
+
+        const createColJson = await createColRes.json();
+
+        if (!createColRes.ok) {
+          console.error("Create collection error:", createColJson);
+          return res.json({
+            success: false,
+            error: "Kunne ikke oprette kollektion",
+          });
+        }
+
+        collectionId = createColJson.custom_collection.id;
+
+        console.log("Created new collection with ID:", collectionId);
+
+        // Gem som metafield på kunden – brug B2B-navngivning,
+        // så det matcher dit Liquid:
+        // customer.metafields.b2b.personal_collection_id
+        const metaCreateRes = await fetch(
+          `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/metafields.json`,
+          {
+            method: "POST",
+            headers: {
+              "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              metafield: {
+                namespace: "b2b",
+                key: "personal_collection_id",
+                value: String(collectionId),
+                type: "number_integer",
+                owner_resource: "customer",
+                owner_id: customerId,
+              },
+            }),
+          }
+        );
+
+        const metaCreateJson = await metaCreateRes.json();
+
+        if (!metaCreateRes.ok) {
+          console.error("Create metafield error:", metaCreateJson);
+          // Ikke fatal – kollektionen eksisterer,
+          // men vi kan ikke gemme ID'et som metafield.
+        }
+      }
     }
 
-    return res.json({ success: true, message: 'Product added to collection', shopify: json });
+    // Hvis vi stadig ikke har et collectionId her, så giv op
+    if (!collectionId) {
+      return res.json({
+        success: false,
+        error: "Ingen collectionId fundet eller oprettet",
+      });
+    }
 
+    // 3) Tilføj produkt til kollektionen (på produkt-niveau, ikke variant)
+    const addProductRes = await fetch(
+      `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/collects.json`,
+      {
+        method: "POST",
+        headers: {
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          collect: {
+            collection_id: collectionId,
+            product_id: productId,
+          },
+        }),
+      }
+    );
+
+    const addProductJson = await addProductRes.json();
+
+    if (!addProductRes.ok) {
+      console.error("Add product error:", addProductJson);
+      return res.json({
+        success: false,
+        error: "Kunne ikke tilføje produkt til kollektion",
+      });
+    }
+
+    console.log(
+      `Product ${productId} (variant ${variantId || "N/A"}) added to collection ${collectionId}`
+    );
+
+    return res.json({ success: true, message: "Product added to collection", shopify: addProductJson });
   } catch (err) {
-    console.error('Server error in /add-to-collection:', err);
-    return res.status(500).json({ success: false, error: 'Server error' });
+    console.error("Server error (add-to-collection):", err);
+    return res.json({ success: false, error: err.message });
   }
 });
 
-/**
- * RUTE: Remove product from customer's personal collection
- * Body: { customerId, productId, collectionId, shop }
- */
-app.post('/remove-from-collection', async (req, res) => {
-    const { productId, collectionId, shop } = req.body || {};
-    if (!productId || !collectionId) return res.status(400).json({ success: false, error: 'Missing IDs' });
-    const credentials = getShopifyCredentials(shop);
-    if (!credentials) return res.status(500).json({ success: false, error: 'Server misconfigured' });
-    const { shopDomain, adminToken } = credentials;
 
-    try {
-        const searchUrl = `https://${shopDomain}/admin/api/2024-01/collects.json?product_id=${productId}&collection_id=${collectionId}`;
-        const searchResp = await fetch(searchUrl, { method: 'GET', headers: { 'X-Shopify-Access-Token': adminToken } });
-        const searchJson = await searchResp.json();
-        
-        if (!searchJson.collects || searchJson.collects.length === 0) {
-            return res.status(404).json({ success: false, error: 'Product not found in collection' });
-        }
-        
-        const collectId = searchJson.collects[0].id; // Korrekt brug af array index 0
-        const deleteUrl = `https://${shopDomain}/admin/api/2024-01/collects/${collectId}.json`;
-
-        const deleteResp = await fetch(deleteUrl, { method: 'DELETE', headers: { 'X-Shopify-Access-Token': adminToken } });
-
-        if (!deleteResp.ok) {
-             const errorText = await deleteResp.text();
-            return res.status(500).json({ success: false, error: 'Shopify API error during deletion', details: errorText });
-        }
-
-        return res.json({ success: true, message: 'Product removed from collection' });
-
-    } catch (err) {
-        console.error('Server error in /remove-from-collection:', err);
-        return res.status(500).json({ success: false, error: 'Server error' });
-    }
-});
-
-
-/**
- * RUTE: Assign product/variant to an employee (via metafields på varianten)
- * Body: { productId, variantId, employeeName, shop }
- */
-app.post('/assign-to-employee', async (req, res) => {
-    const { productId, variantId, employeeName, shop } = req.body || {};
-
-    console.log('--- Assign to Employee request ---');
-    if (!productId || !variantId || !employeeName) {
-        return res.status(400).json({ success: false, error: 'Missing productId, variantId, or employeeName' });
-    }
-
-    const credentials = getShopifyCredentials(shop);
-    if (!credentials) {
-        return res.status(500).json({ success: false, error: 'Server misconfigured' });
-    }
-    const { shopDomain, adminToken } = credentials;
-
-    try {
-        const metafieldUrl = `https://${shopDomain}/admin/api/2024-01/variants/${variantId}/metafields.json`;
-        
-        const metafieldPayload = {
-            metafield: {
-                namespace: "custom", 
-                key: "assigned_employee", 
-                value: employeeName,
-                type: "single_line_text_field"
-            }
-        };
-
-        const resp = await fetch(metafieldUrl, {
-            method: 'POST',
-            headers: {
-                'X-Shopify-Access-Token': adminToken,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(metafieldPayload)
-        });
-
-        if (!resp.ok) {
-            const errorDetails = await resp.text();
-            console.error("Shopify Metafield API Error:", errorDetails);
-            return res.status(500).json({ success: false, error: 'Failed to assign employee via metafield', details: errorDetails });
-        }
-
-        return res.json({ success: true, message: `Variant ${variantId} assigned to ${employeeName}` });
-
-    } catch (err) {
-        console.error('Server error in /assign-to-employee:', err);
-        return res.status(500).json({ success: false, error: 'Server error' });
-    }
-});
-
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`TT collection service listening on port ${PORT}`);
-});
