@@ -1,12 +1,21 @@
 const express = require("express");
+const cors = require("cors");
 
 const app = express();
-app.use(express.json());
+const PORT = process.env.PORT || 10000;
+
+// Middleware
+app.use(cors());            // Åbner for CORS (kan strammes senere)
+app.use(express.json());    // JSON-body parsing
 
 // Fra Render env vars
 const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN; // fx "gn2axf-h1.myshopify.com"
 const API_VERSION = "2024-01";
+
+if (!ADMIN_API_TOKEN || !SHOP_DOMAIN) {
+  console.warn("⚠️ Mangler SHOPIFY_ADMIN_TOKEN eller SHOPIFY_SHOP_DOMAIN i env vars");
+}
 
 // Root – healthcheck
 app.get("/", (req, res) => {
@@ -137,7 +146,7 @@ app.post("/add-to-collection", async (req, res) => {
         // så det matcher dit Liquid:
         // customer.metafields.b2b.personal_collection_id
         const metaCreateRes = await fetch(
-          `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/metafields.json`,
+          `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}/customers/${customerId}/metafields.json`,
           {
             method: "POST",
             headers: {
@@ -150,8 +159,6 @@ app.post("/add-to-collection", async (req, res) => {
                 key: "personal_collection_id",
                 value: String(collectionId),
                 type: "number_integer",
-                owner_resource: "customer",
-                owner_id: customerId,
               },
             }),
           }
@@ -207,11 +214,129 @@ app.post("/add-to-collection", async (req, res) => {
       `Product ${productId} (variant ${variantId || "N/A"}) added to collection ${collectionId}`
     );
 
-    return res.json({ success: true, message: "Product added to collection", shopify: addProductJson });
+    return res.json({
+      success: true,
+      message: "Product added to collection",
+      shopify: addProductJson,
+    });
   } catch (err) {
     console.error("Server error (add-to-collection):", err);
     return res.json({ success: false, error: err.message });
   }
 });
 
+/**
+ * POST /assign-to-employee
+ *
+ * Body:
+ * {
+ *   productId: "...",
+ *   variantId: "...",
+ *   employeeAddressId: "...",   // address.id
+ *   employeeName: "...",        // kun til log
+ *   customerId: "...",          // kunden vi gemmer metafield på
+ *   shop: "gn2axf-h1.myshopify.com" // valgfri, kun til log
+ * }
+ *
+ * Gemmer på CUSTOMER-metafield:
+ * namespace: "b2b"
+ * key: "assigned_variants"
+ * type: "multi_line_text_field"
+ *
+ * Struktur:
+ * {
+ *   "<addressId>": {
+ *     "<productId>": ["<variantId1>", "<variantId2>", ...]
+ *   }
+ * }
+ */
+app.post("/assign-to-employee", async (req, res) => {
+  const {
+    productId,
+    variantId,
+    employeeAddressId,
+    employeeName,
+    customerId,
+    shop,
+  } = req.body || {};
 
+  console.log("----- Assign to Employee request -----");
+  console.log("Body:", JSON.stringify(req.body, null, 2));
+
+  if (!productId || !variantId || !employeeAddressId || !customerId) {
+    return res.status(400).json({
+      success: false,
+      error:
+        "Missing productId, variantId, employeeAddressId eller customerId i request body",
+      received: { productId, variantId, employeeAddressId, customerId },
+    });
+  }
+
+  console.log("Shop:             ", shop || SHOP_DOMAIN);
+  console.log("Customer (ID):    ", customerId);
+  console.log("Employee address: ", employeeAddressId);
+  console.log("Employee name:    ", employeeName || "N/A");
+  console.log("Product:          ", productId);
+  console.log("Variant:          ", variantId);
+  console.log("--------------------------------");
+
+  try {
+    const baseUrl = `https://${SHOP_DOMAIN}/admin/api/${API_VERSION}`;
+
+    // 1) Hent kundens metafields
+    const mfRes = await fetch(
+      `${baseUrl}/customers/${customerId}/metafields.json`,
+      {
+        headers: {
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    const mfJson = await mfRes.json();
+    console.log("Customer metafields status:", mfRes.status);
+    console.log("Customer metafields body:", JSON.stringify(mfJson, null, 2));
+
+    if (!mfRes.ok) {
+      console.error("Customer metafields fetch error:", mfJson);
+      return res.status(500).json({
+        success: false,
+        error: "Kunne ikke hente kundens metafields",
+        details: mfJson,
+      });
+    }
+
+    // 2) Find eksisterende b2b.assigned_variants (på CUSTOMER)
+    let assignedMeta = Array.isArray(mfJson.metafields)
+      ? mfJson.metafields.find(
+          (mf) => mf.namespace === "b2b" && mf.key === "assigned_variants"
+        )
+      : null;
+
+    let assignedValue = {};
+
+    if (assignedMeta && assignedMeta.value) {
+      try {
+        assignedValue = JSON.parse(assignedMeta.value);
+      } catch (e) {
+        console.warn(
+          "Kunne ikke parse eksisterende JSON for b2b.assigned_variants, nulstiller.",
+          e
+        );
+        assignedValue = {};
+      }
+    }
+
+    const addrId = String(employeeAddressId);
+    const pid = String(productId);
+    const vid = String(variantId);
+
+    // 3) Opdater JS-strukturen
+    // {
+    //   "<addressId>": {
+    //     "<productId>": ["<variantId1>", "<variantId2>", ...]
+    //   }
+    // }
+
+    if (!assign
